@@ -1,0 +1,56 @@
+name: Sync Releases from External Repository
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 时间午夜运行，可根据需要调整 cron 表达式
+  workflow_dispatch:       # 允许手动触发工作流
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤1：检出当前仓库（可选，但推荐用于日志或后续操作）
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
+      # 步骤2：安装 jq（用于解析 JSON）
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # 步骤3：从源仓库获取最新发布版信息
+      - name: Get latest release info from source repo
+        id: get-release
+        run: |
+          # 使用 GitHub API 获取最新发布版，如果源仓库私有需提供 SOURCE_TOKEN
+          response=$(curl -s -H "Authorization: token ${{ secrets.SOURCE_TOKEN || secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/owner/source-repo/releases/latest")
+          tag_name=$(echo "$response" | jq -r '.tag_name')
+          assets_url=$(echo "$response" | jq -r '.assets_url')
+          echo "tag_name=$tag_name" >> $GITHUB_OUTPUT
+          echo "assets_url=$assets_url" >> $GITHUB_OUTPUT
+
+      # 步骤4：下载发布版资产（如 zip、tar.gz 文件）
+      - name: Download release assets
+        run: |
+          assets_response=$(curl -s -H "Authorization: token ${{ secrets.SOURCE_TOKEN || secrets.GITHUB_TOKEN }}" \
+            "${{ steps.get-release.outputs.assets_url }}")
+          echo "$assets_response" | jq -r '.[] | .browser_download_url' | while read url; do
+            wget -q "$url"  # 静默下载资产到当前目录
+          done
+
+      # 步骤5：在当前仓库中创建发布版
+      - name: Create release in current repo
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 当前仓库的 token，自动提供
+        with:
+          tag_name: ${{ steps.get-release.outputs.tag_name }}  # 使用源仓库的标签名
+          release_name: Release ${{ steps.get-release.outputs.tag_name }}  # 发布版名称
+          body: "Automatically synced from source repository on $(date -u)."  # 发布版描述
+          draft: false
+          prerelease: false
+          files: |  # 上传所有下载的资产文件（根据实际扩展名调整）
+            ./*.zip
+            ./*.tar.gz
+            ./*.deb
+            # 添加其他文件模式，或使用 ./* 上传所有文件（注意可能包含无关文件）
