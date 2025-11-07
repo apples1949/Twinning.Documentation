@@ -1,0 +1,5 @@
+version: "1"
+rules:
+  - base: test
+    upstream: twinstar6980/Twinning.Documentation    # change `wei` to the owner of upstream repo
+    mergeMethod: merge
