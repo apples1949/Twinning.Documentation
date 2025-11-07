@@ -1,0 +1,134 @@
+name: Sync Releases from External Repository
+
+on:
+  schedule:
+    - cron: '0 16 * * 0'  # 每天 UTC 时间午夜运行
+  workflow_dispatch:       # 允许手动触发
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤1：检出当前仓库
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
+      # 步骤2：安装必要工具
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl wget file
+
+      # 步骤3：从源仓库获取最新发布版信息
+      - name: Get latest release info from source repo
+        id: get-release
+        run: |
+          # 设置源仓库信息 - 请替换为实际的源仓库
+          SOURCE_REPO="twinstar6980/Twinning.Documentation"
+          
+          # 获取最新发布版信息
+          response=$(curl -s -H "Authorization: token ${{ secrets.SOURCE_TOKEN || secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
+          
+          # 检查是否成功获取发布版
+          if echo "$response" | jq -e '.id' > /dev/null 2>&1; then
+            # 提取发布版信息
+            tag_name=$(echo "$response" | jq -r '.tag_name')
+            release_name=$(echo "$response" | jq -r '.name // .tag_name')
+            body=$(echo "$response" | jq -r '.body')
+            assets_url=$(echo "$response" | jq -r '.assets_url')
+            
+            echo "tag_name=$tag_name" >> $GITHUB_OUTPUT
+            echo "release_name=$release_name" >> $GITHUB_OUTPUT
+            echo "body=$body" >> $GITHUB_OUTPUT
+            echo "assets_url=$assets_url" >> $GITHUB_OUTPUT
+            echo "source_repo=$SOURCE_REPO" >> $GITHUB_OUTPUT
+            echo "release_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "No release found in source repository"
+            echo "release_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤4：获取所有资产文件并下载
+      - name: Get and download all release assets
+        if: steps.get-release.outputs.release_found == 'true'
+        id: download-assets
+        run: |
+          # 获取资产列表
+          assets_response=$(curl -s -H "Authorization: token ${{ secrets.SOURCE_TOKEN || secrets.GITHUB_TOKEN }}" \
+            "${{ steps.get-release.outputs.assets_url }}")
+          
+          # 创建资产目录
+          mkdir -p release_assets
+          
+          # 下载所有资产文件
+          echo "$assets_response" | jq -r '.[] | "\(.name) \(.browser_download_url)"' | while read name url; do
+            if [ -n "$name" ] && [ -n "$url" ]; then
+              echo "Downloading: $name"
+              wget -q -O "release_assets/$name" "$url"
+              echo "Downloaded: $name"
+            fi
+          done
+          
+          # 列出下载的文件
+          echo "Downloaded files:"
+          ls -la release_assets/
+          
+          # 统计文件数量
+          file_count=$(ls -1 release_assets/ | wc -l)
+          echo "file_count=$file_count" >> $GITHUB_OUTPUT
+
+      # 步骤5：检查当前仓库是否已存在该发布版
+      - name: Check if release already exists
+        if: steps.get-release.outputs.release_found == 'true' && steps.download-assets.outputs.file_count != '0'
+        id: check-release
+        run: |
+          # 检查当前仓库是否已存在相同标签的发布版
+          response=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get-release.outputs.tag_name }}")
+          
+          if echo "$response" | jq -e '.id' > /dev/null 2>&1; then
+            echo "Release already exists, skipping creation"
+            echo "release_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release does not exist, will create new one"
+            echo "release_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤6：创建发布版（仅当不存在时）
+      - name: Create release
+        if: steps.get-release.outputs.release_found == 'true' && steps.download-assets.outputs.file_count != '0' && steps.check-release.outputs.release_exists == 'false'
+        id: create-release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get-release.outputs.tag_name }}
+          name: ${{ steps.get-release.outputs.release_name }}
+          body: |
+            Synced from ${{ steps.get-release.outputs.source_repo }}
+            
+            Original release: https://github.com/${{ steps.get-release.outputs.source_repo }}/releases/tag/${{ steps.get-release.outputs.tag_name }}
+            
+            ${{ steps.get-release.outputs.body }}
+            
+            *Automatically synced on $(date -u)*
+          draft: false
+          prerelease: false
+          files: release_assets/*
+
+      # 步骤7：清理下载的文件
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -d "release_assets" ]; then
+            rm -rf release_assets
+            echo "Cleaned up downloaded files"
+          fi
+
+      # 步骤8：输出状态信息
+      - name: Output status
+        run: |
+          echo "=== Sync Status ==="
+          echo "Release found: ${{ steps.get-release.outputs.release_found || 'unknown' }}"
+          echo "Files downloaded: ${{ steps.download-assets.outputs.file_count || '0' }}"
+          echo "Release exists: ${{ steps.check-release.outputs.release_exists || 'unknown' }}"
+          echo "Release created: ${{ steps.create-release.outputs.id && 'yes' || 'no' }}"
