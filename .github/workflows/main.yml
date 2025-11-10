@@ -2,7 +2,7 @@ name: Sync Releases from External Repository
 
 on:
   schedule:
-    - cron: '0 16 * * 0'  # 每天 UTC 时间午夜运行
+    - cron: '0 16 * * 0'
   workflow_dispatch:       # 允许手动触发
 
 jobs:
@@ -88,16 +88,34 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get-release.outputs.tag_name }}")
           
           if echo "$response" | jq -e '.id' > /dev/null 2>&1; then
-            echo "Release already exists, skipping creation"
+            release_id=$(echo "$response" | jq -r '.id')
+            echo "Release already exists with ID: $release_id"
             echo "release_exists=true" >> $GITHUB_OUTPUT
+            echo "release_id=$release_id" >> $GITHUB_OUTPUT
           else
-            echo "Release does not exist, will create new one"
+            echo "Release does not exist"
             echo "release_exists=false" >> $GITHUB_OUTPUT
           fi
 
-      # 步骤6：创建发布版（仅当不存在时）
+      # 步骤6：删除现有发布版（如果存在）
+      - name: Delete existing release
+        if: steps.get-release.outputs.release_found == 'true' && steps.download-assets.outputs.file_count != '0' && steps.check-release.outputs.release_exists == 'true'
+        run: |
+          echo "Deleting existing release with ID: ${{ steps.check-release.outputs.release_id }}"
+          
+          # 删除发布版
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/${{ steps.check-release.outputs.release_id }}"
+          
+          echo "Release deleted successfully"
+          
+          # 等待一段时间确保删除完成
+          sleep 3
+
+      # 步骤7：创建发布版
       - name: Create release
-        if: steps.get-release.outputs.release_found == 'true' && steps.download-assets.outputs.file_count != '0' && steps.check-release.outputs.release_exists == 'false'
+        if: steps.get-release.outputs.release_found == 'true' && steps.download-assets.outputs.file_count != '0'
         id: create-release
         uses: softprops/action-gh-release@v1
         with:
@@ -115,7 +133,7 @@ jobs:
           prerelease: false
           files: release_assets/*
 
-      # 步骤7：清理下载的文件
+      # 步骤8：清理下载的文件
       - name: Cleanup
         if: always()
         run: |
@@ -124,11 +142,11 @@ jobs:
             echo "Cleaned up downloaded files"
           fi
 
-      # 步骤8：输出状态信息
+      # 步骤9：输出状态信息
       - name: Output status
         run: |
           echo "=== Sync Status ==="
           echo "Release found: ${{ steps.get-release.outputs.release_found || 'unknown' }}"
           echo "Files downloaded: ${{ steps.download-assets.outputs.file_count || '0' }}"
-          echo "Release exists: ${{ steps.check-release.outputs.release_exists || 'unknown' }}"
+          echo "Release existed: ${{ steps.check-release.outputs.release_exists || 'unknown' }}"
           echo "Release created: ${{ steps.create-release.outputs.id && 'yes' || 'no' }}"
