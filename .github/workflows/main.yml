@@ -1,8 +1,6 @@
 name: Sync Releases from External Repository
 
 on:
-  schedule:
-    - cron: '0 16 * * 0'
   workflow_dispatch:       # 允许手动触发
 
 jobs:
